@@ -1,60 +1,105 @@
-import math
-from typing import Optional, Union
+#encoding: utf-8
+
+##
+## cartpole.py
+## Gaetan JUVIN 06/24/2017
+##
+
+import gym
+import random
+import os
 import numpy as np
-import gymnasium as gym
-from gymnasium import logger, spaces
-from gymnasium.envs.classic_control import utils
-from gymnasium.error import DependencyNotInstalled
-import tensorflow as tf
-from tf_agents.agents.dqn import dqn_agent
-from tf_agents.networks import q_network
-from tf_agents.environments import suite_gym
-from tf_agents.trajectories import trajectory
-class DQNAgent:
-    def __init__(self, env_name):
-        self.env = gym.make(env_name)
-        self.q_net = q_network.QNetwork(
-            self.env.observation_space,
-            self.env.action_space.n,
-            fc_layer_params=(100,)
-        )
-        self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=0.001)
-        self.agent = dqn_agent.DqnAgent(
-            self.env.observation_space,
-            self.env.action_space,
-            q_network=self.q_net,
-            optimizer=self.optimizer,
-            td_errors_loss_fn=tf.compat.v1.losses.huber_loss,
-            train_step_counter=tf.Variable(0)
-        )
-        self.agent.initialize()
-    
-    def train(self, num_iterations):
-        for i in range(num_iterations):
-            time_step = self.env.reset()
-            while True:
-                action_step = self.agent.collect_policy.action(time_step)
-                next_time_step = self.env.step(action_step.action.numpy()[0])
-                traj = trajectory.from_transition(time_step, action_step, next_time_step)
-                self.agent.train(experience=traj)
-                time_step = next_time_step
-                if time_step.is_last():
-                    break
-    
-    def get_action(self, observation):
-        time_step = self.env.reset()
-        time_step = time_step._replace(observation=observation)
-        action_step = self.agent.policy.action(time_step)
-        return action_step.action.numpy()[0]
+from collections      import deque
+from keras.models     import Sequential
+from keras.layers     import Dense
+from keras.optimizers import Adam
 
-agent = DQNAgent('CartPole-v1')
-agent.train(100)
+class Agent():
+    def __init__(self, state_size, action_size):
+        self.weight_backup      = "cartpole_weight.h5"
+        self.state_size         = state_size
+        self.action_size        = action_size
+        self.memory             = deque(maxlen=2000)
+        self.learning_rate      = 0.001
+        self.gamma              = 0.95
+        self.exploration_rate   = 1.0
+        self.exploration_min    = 0.01
+        self.exploration_decay  = 0.995
+        self.brain              = self._build_model()
 
-myenv= gym.make('CartPole-v1', render_mode='human')
+    def _build_model(self):
+        # Neural Net for Deep-Q learning Model
+        model = Sequential()
+        model.add(Dense(24, input_dim=self.state_size, activation='relu'))
+        model.add(Dense(24, activation='relu'))
+        model.add(Dense(self.action_size, activation='linear'))
+        model.compile(loss='mse', optimizer=Adam(lr=self.learning_rate))
 
-done=False
-obs=myenv.reset()
-while not done:
-    action = agent.get_action(obs)
-    obs, reward, done, info = myenv.step(action)
-    myenv.render()
+        if os.path.isfile(self.weight_backup):
+            model.load_weights(self.weight_backup)
+            self.exploration_rate = self.exploration_min
+        return model
+
+    def save_model(self):
+            self.brain.save(self.weight_backup)
+
+    def act(self, state):
+        if np.random.rand() <= self.exploration_rate:
+            return random.randrange(self.action_size)
+        act_values = self.brain.predict(state)
+        return np.argmax(act_values[0])
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def replay(self, sample_batch_size):
+        if len(self.memory) < sample_batch_size:
+            return
+        sample_batch = random.sample(self.memory, sample_batch_size)
+        for state, action, reward, next_state, done in sample_batch:
+            target = reward
+            if not done:
+              target = reward + self.gamma * np.amax(self.brain.predict(next_state)[0])
+            target_f = self.brain.predict(state)
+            target_f[0][action] = target
+            self.brain.fit(state, target_f, epochs=1, verbose=0)
+        if self.exploration_rate > self.exploration_min:
+            self.exploration_rate *= self.exploration_decay
+
+class CartPole:
+    def __init__(self):
+        self.sample_batch_size = 32
+        self.episodes          = 1
+        self.env               = gym.make('CartPole-v1')
+
+        self.state_size        = self.env.observation_space.shape[0]
+        self.action_size       = self.env.action_space.n
+        self.agent             = Agent(self.state_size, self.action_size)
+
+
+    def run(self):
+        try:
+            for index_episode in range(self.episodes):
+                state = self.env.reset()
+                state = np.reshape(state, [1, self.state_size])
+
+                done = False
+                index = 0
+                while not done:
+                    self.env.render()
+
+                    action = self.agent.act(state)
+
+                    next_state, reward, done, _ = self.env.step(action)      #decide an action
+                    next_state = np.reshape(next_state, [1, self.state_size])
+                    self.agent.remember(state, action, reward, next_state, done) #add current state to replay buffer
+                    state = next_state
+                    index += 1
+                print("Episode {}# Score: {}".format(index_episode, index + 1))
+                self.agent.replay(self.sample_batch_size)
+        finally:
+            self.agent.save_model()
+
+if __name__ == "__main__":
+    cartpole = CartPole()
+    cartpole.run()
